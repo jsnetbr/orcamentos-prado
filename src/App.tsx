@@ -1,197 +1,53 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-
-type QuoteStatus = "pendente" | "escolhido" | "recusado";
-
-type Quote = {
-  id: string;
-  empresa: string;
-  contato: string;
-  item: string;
-  quantidade: number;
-  valor: number;
-  loja: string;
-  observacoes: string;
-  status: QuoteStatus;
-  criadoEm: string;
-};
-
-type QuoteForm = {
-  empresa: string;
-  contato: string;
-  item: string;
-  quantidade: string;
-  valor: string;
-  loja: string;
-  observacoes: string;
-  status: QuoteStatus;
-};
-
-const STORAGE_KEY = "orcamentos-cotacoes-v1";
-
-const emptyForm: QuoteForm = {
-  empresa: "",
-  contato: "",
-  item: "",
-  quantidade: "1",
-  valor: "",
-  loja: "",
-  observacoes: "",
-  status: "pendente"
-};
-
-const initialQuotes: Quote[] = [
-  {
-    id: "exemplo-1",
-    empresa: "BR tapetes e capacho",
-    contato: "41 9527-7302",
-    item: "tapete entrada de loja, capacho",
-    quantidade: 2,
-    valor: 528,
-    loja: "2",
-    observacoes: "Exemplo baseado na planilha.",
-    status: "pendente",
-    criadoEm: new Date().toISOString()
-  },
-  {
-    id: "exemplo-2",
-    empresa: "comercial Kapforte tapete",
-    contato: "47 3021-6667",
-    item: "tapete entrada de loja, capacho",
-    quantidade: 2,
-    valor: 996,
-    loja: "2",
-    observacoes: "",
-    status: "pendente",
-    criadoEm: new Date().toISOString()
-  },
-  {
-    id: "exemplo-3",
-    empresa: "floripa Comunicação Visual",
-    contato: "48 9163-4456",
-    item: "tapete entrada de loja, capacho",
-    quantidade: 2,
-    valor: 1756,
-    loja: "2",
-    observacoes: "",
-    status: "pendente",
-    criadoEm: new Date().toISOString()
-  },
-  {
-    id: "exemplo-4",
-    empresa: "dois anjos",
-    contato: "4891040062",
-    item: "tapete entrada de loja, capacho",
-    quantidade: 2,
-    valor: 791.56,
-    loja: "2",
-    observacoes: "",
-    status: "pendente",
-    criadoEm: new Date().toISOString()
-  }
-];
-
-const currencyFormatter = new Intl.NumberFormat("pt-BR", {
-  style: "currency",
-  currency: "BRL"
-});
-
-const dateFormatter = new Intl.DateTimeFormat("pt-BR");
-
-function normalizeText(value: string) {
-  return value
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim();
-}
-
-function parseMoney(value: string) {
-  const normalized = value.replace(/[^\d,.-]/g, "").replace(/\./g, "").replace(",", ".");
-  const number = Number(normalized);
-  return Number.isFinite(number) ? number : 0;
-}
-
-function formatMoney(value: number) {
-  return currencyFormatter.format(value);
-}
-
-function makeId() {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function readStoredQuotes() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return initialQuotes;
-    const parsed = JSON.parse(saved) as Quote[];
-    return Array.isArray(parsed) ? parsed : initialQuotes;
-  } catch {
-    return initialQuotes;
-  }
-}
-
-function toCsvValue(value: string | number) {
-  const text = String(value).replace(/"/g, '""');
-  return `"${text}"`;
-}
-
-function exportQuotesToCsv(quotes: Quote[]) {
-  const headers = [
-    "Empresa",
-    "Contato",
-    "Orçamento",
-    "Quantidade",
-    "Valor",
-    "Loja",
-    "Observações",
-    "Status",
-    "Data"
-  ];
-
-  const rows = quotes.map((quote) => [
-    quote.empresa,
-    quote.contato,
-    quote.item,
-    quote.quantidade,
-    quote.valor.toFixed(2).replace(".", ","),
-    quote.loja,
-    quote.observacoes,
-    quote.status,
-    dateFormatter.format(new Date(quote.criadoEm))
-  ]);
-
-  const csv = [headers, ...rows].map((row) => row.map(toCsvValue).join(";")).join("\n");
-  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `orcamentos-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
-function getLowestValueByItem(quotes: Quote[]) {
-  return quotes.reduce<Record<string, number>>((acc, quote) => {
-    const itemKey = normalizeText(quote.item);
-    const current = acc[itemKey];
-    acc[itemKey] = current === undefined ? quote.valor : Math.min(current, quote.valor);
-    return acc;
-  }, {});
-}
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { exportQuotesToCsv, parseQuotesFromCsv } from "./csv";
+import {
+  deleteQuoteFromDb,
+  loadQuotesFromStorage,
+  replaceQuotesInDb,
+  saveQuoteToDb
+} from "./quoteStorage";
+import {
+  dateFormatter,
+  emptyForm,
+  formatMoney,
+  getLowestValueByItem,
+  makeId,
+  normalizeText,
+  parseMoney
+} from "./quoteUtils";
+import { Quote, QuoteForm, QuoteStatus } from "./types";
 
 function App() {
-  const [quotes, setQuotes] = useState<Quote[]>(readStoredQuotes);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [quotes, setQuotes] = useState<Quote[]>([]);
   const [form, setForm] = useState<QuoteForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [itemFilter, setItemFilter] = useState("todos");
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(quotes));
-  }, [quotes]);
+    let isMounted = true;
+
+    async function loadQuotes() {
+      try {
+        const loadedQuotes = await loadQuotesFromStorage();
+        if (isMounted) setQuotes(loadedQuotes);
+      } catch (error) {
+        console.error("Erro ao carregar o banco de dados", error);
+        if (isMounted) setQuotes([]);
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    }
+
+    loadQuotes();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const items = useMemo(() => {
     const uniqueItems = new Set(quotes.map((quote) => quote.item).filter(Boolean));
@@ -222,6 +78,8 @@ function App() {
     };
   }, [filteredQuotes]);
 
+  const hasExampleQuotes = quotes.some((quote) => quote.id.startsWith("exemplo-"));
+
   function updateForm(field: keyof QuoteForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
   }
@@ -238,7 +96,7 @@ function App() {
     setIsFormOpen(false);
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const nextQuote: Quote = {
@@ -255,6 +113,8 @@ function App() {
         ? quotes.find((quote) => quote.id === editingId)?.criadoEm ?? new Date().toISOString()
         : new Date().toISOString()
     };
+
+    await saveQuoteToDb(nextQuote);
 
     if (editingId) {
       setQuotes((current) => current.map((quote) => (quote.id === editingId ? nextQuote : quote)));
@@ -280,12 +140,47 @@ function App() {
     setIsFormOpen(true);
   }
 
-  function deleteQuote(id: string) {
+  async function deleteQuote(id: string) {
     const quote = quotes.find((current) => current.id === id);
     const confirmed = window.confirm(`Excluir a cotação de ${quote?.empresa ?? "esta empresa"}?`);
     if (!confirmed) return;
+    await deleteQuoteFromDb(id);
     setQuotes((current) => current.filter((item) => item.id !== id));
     if (editingId === id) closeForm();
+  }
+
+  async function clearExampleQuotes() {
+    const confirmed = window.confirm("Apagar somente os dados de exemplo?");
+    if (!confirmed) return;
+    const realQuotes = quotes.filter((quote) => !quote.id.startsWith("exemplo-"));
+    await replaceQuotesInDb(realQuotes);
+    setQuotes(realQuotes);
+  }
+
+  function openCsvImporter() {
+    fileInputRef.current?.click();
+  }
+
+  async function importCsv(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    const csv = await file.text();
+    const importedQuotes = parseQuotesFromCsv(csv);
+
+    if (!importedQuotes.length) {
+      window.alert("Não encontrei cotações válidas neste arquivo CSV.");
+      return;
+    }
+
+    const replaceCurrent = window.confirm(
+      "Importar CSV\n\nOK = substituir tudo pelos dados do arquivo.\nCancelar = adicionar aos dados atuais."
+    );
+    const nextQuotes = replaceCurrent ? importedQuotes : [...importedQuotes, ...quotes];
+
+    await replaceQuotesInDb(nextQuotes);
+    setQuotes(nextQuotes);
   }
 
   return (
@@ -296,7 +191,21 @@ function App() {
           <h1>Orçamentos</h1>
         </div>
         <div className="top-actions">
-          <button type="button" className="secondary-button" onClick={() => exportQuotesToCsv(quotes)} disabled={!quotes.length}>
+          <input ref={fileInputRef} type="file" accept=".csv,text/csv" hidden onChange={importCsv} />
+          {hasExampleQuotes && (
+            <button type="button" className="secondary-button" onClick={clearExampleQuotes}>
+              Apagar exemplos
+            </button>
+          )}
+          <button type="button" className="secondary-button" onClick={openCsvImporter}>
+            Importar CSV
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => exportQuotesToCsv(quotes)}
+            disabled={!quotes.length}
+          >
             Exportar CSV
           </button>
           <button type="button" className="primary-button" onClick={openNewQuoteForm}>
@@ -349,7 +258,12 @@ function App() {
           </div>
         </div>
 
-        {filteredQuotes.length ? (
+        {isLoading ? (
+          <div className="empty-state">
+            <strong>Carregando banco de dados.</strong>
+            <p>Estou abrindo as cotações salvas neste navegador.</p>
+          </div>
+        ) : filteredQuotes.length ? (
           <div className="table-wrap">
             <table>
               <thead>
@@ -411,7 +325,7 @@ function App() {
         ) : (
           <div className="empty-state">
             <strong>Nenhuma cotação encontrada.</strong>
-            <p>Cadastre a primeira cotação ou ajuste a busca para ver os resultados.</p>
+            <p>Cadastre a primeira cotação ou importe um backup CSV.</p>
             <button type="button" className="primary-button" onClick={openNewQuoteForm}>
               Nova cotação
             </button>
